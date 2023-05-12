@@ -13,7 +13,7 @@ try
         buffer_decode.firstSampleTime=swapbytes(typecast(uint8(buffer(21:28)),'uint64'));
         buffer_decode.sample=uint8(buffer(29:end));
 
-        buffer_decode.sample=reshape(buffer_decode.sample,[3, length(sample)/3]);
+        buffer_decode.sample=reshape(buffer_decode.sample,[3, length(buffer_decode.sample)/3]);
         buffer_decode.sample=rteeg_read_int24(buffer_decode.sample);
         buffer_decode.sample=reshape(buffer_decode.sample, [buffer_decode.numChannels, length(buffer_decode.sample(:))/ buffer_decode.numChannels]);
     else
