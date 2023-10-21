@@ -33,5 +33,5 @@ Casted = typecast(uint8(Casted(:)),'uint32')';
 Casted = bitshift(Casted, 8);
 Casted = bitshift(typecast(Casted,'int32'), -8);
 
-output=Casted;
+output=double(Casted);
 return;
