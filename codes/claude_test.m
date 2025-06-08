@@ -1,3 +1,4 @@
+close all; clear all;
 %% Speedgoat EEG Real-Time UDP System
 % System for receiving EEG data from Bittium NeurOne via UDP
 % and performing real-time spectral analysis
