@@ -16,9 +16,14 @@ buffer_decode=[];
             for ch_idx=1:buffer_decode.numChannels
                 buffer_decode.sourceChannels(ch_idx)=swapbytes(typecast(uint8(buffer(19+(ch_idx-1)*2:20+(ch_idx-1)*2)),'uint16'));
             end;
-            offset=20+(ch_idx-1)*2+1;
+            % PATCH: ChannelTypes are uint8[N], not uint16; keep old code for reference.
+            % offset=20+(ch_idx-1)*2+1;
+            % for ch_idx=1:buffer_decode.numChannels
+            %     buffer_decode.channelType(ch_idx)=swapbytes(typecast(uint8(buffer(offset+(ch_idx-1)*2:offset+1+(ch_idx-1)*2)),'uint16'));
+            % end;
+            offset=19+2*buffer_decode.numChannels;
             for ch_idx=1:buffer_decode.numChannels
-                buffer_decode.channelType(ch_idx)=swapbytes(typecast(uint8(buffer(offset+(ch_idx-1)*2:offset+1+(ch_idx-1)*2)),'uint16'));
+                buffer_decode.channelType(ch_idx)=uint8(buffer(offset+ch_idx-1));
             end;
 
             buffer_decode.flag_ok=1;
@@ -55,7 +60,9 @@ buffer_decode=[];
                 buffer_decode.trigger(trigger_idx).sampleIndex=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+9:8+(trigger_idx-1)*20+16)),'uint64'));
                 buffer_decode.trigger(trigger_idx).type=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+17)),'uint8'));
                 buffer_decode.trigger(trigger_idx).code=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+18)),'uint8'));
-                buffer_decode.trigger(trigger_idx).reserved=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+19:(trigger_idx-1)*20+20)),'uint16'));
+                % PATCH: Fix reserved field slice indexing; old code missed +8 offset.
+                % buffer_decode.trigger(trigger_idx).reserved=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+19:(trigger_idx-1)*20+20)),'uint16'));
+                buffer_decode.trigger(trigger_idx).reserved=swapbytes(typecast(uint8(buffer(8+(trigger_idx-1)*20+19:8+(trigger_idx-1)*20+20)),'uint16'));
             end;
 
             buffer_decode.flag_ok=1;
@@ -89,4 +96,3 @@ buffer_decode=[];
 
 
 return;
-

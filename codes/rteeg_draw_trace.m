@@ -1,4 +1,6 @@
-function [trace_obj]=rt_eeg_draw_trace(data,config_trace_fs, varargin)
+% PATCH: function name must match file name for MATLAB.
+% function [trace_obj]=rt_eeg_draw_trace(data,config_trace_fs, varargin)
+function [trace_obj]=rteeg_draw_trace(data,config_trace_fs, varargin)
 
 fig=[];
 trace_obj=[];
