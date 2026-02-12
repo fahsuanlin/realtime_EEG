@@ -20,18 +20,12 @@ if(m~=3)
     return;
 end;
 
-Bytes=flipud(input); %little --> big endian
-
-%Bytes=flipud([248 231 55]');
-% reshape to matrix with one column(length 3) for each int24 value
-Casted = reshape(Bytes,3,[]);
-% add pending zero to each column to enable native uint32 type conversion
-Casted = [Casted;zeros(1,size(Casted,2))];
-% execute typecast for each column and transpose to maintain row vector
-Casted = typecast(uint8(Casted(:)),'uint32')';
-% simulate int32 value by bytehshift, convert and shift back
-Casted = bitshift(Casted, 8);
-Casted = bitshift(typecast(Casted,'int32'), -8);
-
-output=double(Casted);
+% Decode signed int24 from bytes ordered as [MSB; MID; LSB].
+u = uint32(input(1,:)) * uint32(65536) + ...
+    uint32(input(2,:)) * uint32(256) + ...
+    uint32(input(3,:));
+i = int32(u);
+negMask = bitand(u, uint32(hex2dec('800000'))) ~= 0;
+i(negMask) = int32(double(i(negMask)) - 2^24);
+output = double(i);
 return;

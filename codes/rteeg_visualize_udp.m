@@ -7,7 +7,7 @@ close all; clear all;
 % wavelet amplitude/phase for a selected channel, and archives data.
 
 %% Parameters
-localPort = 50000;           % UDP port to listen on
+localPort = 50001;           % UDP port to listen on
 defaultFs = 1000;           % fallback sampling rate if no MeasurementStart
 verbose = true;
 checkTimeoutSec = 3;        % UDP sanity check timeout (seconds)
@@ -16,31 +16,96 @@ freqVec = 4:1:250;          % Hz (Morlet frequencies)
 waveletCycles = 7;          % Morlet cycles
 specChannel = 1;            % channel to visualize spectrum
 specUpdateEvery = 20;       % update spectrum every N packets
-showSpectrum = true;        % toggle spectral plot
-logEnabled = true;          % archive incoming data + spectral features
+traceUpdateHz = 10;         % max trace redraw rate (UI), packets are still fully ingested
+showSpectrum = false;       % keep visualization in a single figure window
+logEnabled = false;         % archive incoming data + spectral features
 logFile = fullfile(pwd, ['rteeg_visualize_log_' datestr(now,'yyyymmdd_HHMMSS') '.mat']);
 logFlushEveryPackets = 200; % flush packet data to disk every N packets
 logFlushEverySpec = 50;     % flush spectral data every N spec updates
 
 %% UDP sanity check
-try
-    [ok, info] = rteeg_check_udp_connection('localPort', localPort, 'timeoutSec', checkTimeoutSec, 'verbose', verbose);
-    if ~ok
-        warning('No UDP packets received during check; visualizer will still start.');
+hasNativeUdp = (exist('udpport', 'file') == 2) || (exist('udp', 'file') == 2);
+if hasNativeUdp
+    try
+        [ok, info] = rteeg_check_udp_connection('localPort', localPort, 'timeoutSec', checkTimeoutSec, 'verbose', verbose); %#ok<NASGU>
+        if ~ok
+            warning('No UDP packets received during check; visualizer will still start.');
+        end
+    catch ME
+        warning('UDP check failed: %s', ME.message);
     end
-catch ME
-    warning('UDP check failed: %s', ME.message);
+elseif verbose
+    fprintf('Skipping UDP pre-check (Java socket fallback mode).\n');
 end
 
 %% Init UDP
-if exist('udpport', 'file') ~= 2
-    error('udpport not available in this MATLAB version.');
+useUdpPort = (exist('udpport', 'file') == 2);
+useLegacyUdp = (exist('udp', 'file') == 2);
+jSock = [];
+useJavaUdp = false;
+SOCK_APPDATA_KEY = 'rteeg_visualize_udp_jSock';
+
+% Best-effort cleanup of a stale Java socket from an interrupted prior run.
+if isappdata(0, SOCK_APPDATA_KEY)
+    try
+        oldSock = getappdata(0, SOCK_APPDATA_KEY);
+        if ~isempty(oldSock)
+            oldSock.close();
+        end
+    catch
+    end
+    try
+        rmappdata(0, SOCK_APPDATA_KEY);
+    catch
+    end
 end
-u = udpport("datagram", "IPV4", "LocalPort", localPort);
+
+if useUdpPort
+    u = udpport("datagram", "IPV4", "LocalPort", localPort);
+elseif useLegacyUdp
+    u = udp('0.0.0.0', 'LocalPort', localPort);
+    fopen(u);
+else
+    useJavaUdp = true;
+    u = [];
+    bindErr = [];
+    for bindTry = 1:2
+        try
+            jSock = java.net.DatagramSocket(localPort);
+            jSock.setSoTimeout(10);
+            setappdata(0, SOCK_APPDATA_KEY, jSock);
+            bindErr = [];
+            break;
+        catch ME
+            bindErr = ME;
+            % Retry once after closing any leaked socket from the same MATLAB session.
+            try
+                if isappdata(0, SOCK_APPDATA_KEY)
+                    oldSock = getappdata(0, SOCK_APPDATA_KEY);
+                    if ~isempty(oldSock)
+                        oldSock.close();
+                    end
+                    rmappdata(0, SOCK_APPDATA_KEY);
+                end
+            catch
+            end
+            pause(0.05);
+        end
+    end
+    if ~isempty(bindErr)
+        rethrow(bindErr);
+    end
+end
 
 %% Receive + plot loop
 fs = defaultFs;
 trace_obj = [];
+traceFig = figure('Name', 'EEG Trace', 'Color', 'w', 'Visible', 'on');
+drawnow;
+traceUpdateSec = 1 / max(traceUpdateHz, 1);
+traceLastDrawTic = tic;
+tracePendingChunks = {};
+tracePendingCols = 0;
 buffer = [];
 bufferReady = false;
 packetCount = 0;
@@ -71,20 +136,114 @@ if verbose
 end
 
 while true
-    if u.NumDatagramsAvailable > 0
-        [data, src] = read(u, 1, "uint8");
-        dec = rteeg_decode(data);
+    hasData = false;
+    data = [];
+    srcIP = 'unknown';
+    srcPort = NaN;
+    if useUdpPort
+        if u.NumDatagramsAvailable > 0
+            [data, srcInfo] = read(u, 1, "uint8");
+            try
+                if istable(srcInfo)
+                    if any(strcmp(srcInfo.Properties.VariableNames, 'SourceAddress'))
+                        srcIP = char(string(srcInfo.SourceAddress(1)));
+                    end
+                    if any(strcmp(srcInfo.Properties.VariableNames, 'SourcePort'))
+                        srcPort = double(srcInfo.SourcePort(1));
+                    end
+                end
+            catch
+            end
+            hasData = true;
+        end
+    elseif useLegacyUdp
+        nAvail = get(u, 'BytesAvailable');
+        if nAvail > 0
+            data = fread(u, nAvail, 'uint8');
+            hasData = true;
+        end
+    else
+        try
+            rxBuf = int8(zeros(65535, 1));
+            pkt = java.net.DatagramPacket(rxBuf, numel(rxBuf));
+            jSock.receive(pkt);
+            n = pkt.getLength();
+            raw = pkt.getData();
+            % Preserve raw byte values when converting Java byte[] -> MATLAB uint8.
+            data = typecast(raw(1:n), 'uint8');
+            try
+                srcIP = char(pkt.getAddress().getHostAddress());
+                srcPort = double(pkt.getPort());
+            catch
+            end
+            hasData = true;
+        catch ME
+            msg = '';
+            try
+                msg = char(ME.message);
+            catch
+            end
+            isTimeout = contains(char(ME.identifier), 'SocketTimeoutException') || ...
+                        contains(msg, 'SocketTimeoutException') || ...
+                        contains(msg, 'Receive timed out');
+            if ~isTimeout
+                rethrow(ME);
+            end
+        end
+    end
+
+    if hasData
+        dec = rteeg_decode(uint8(data(:).'));
         if ~isempty(dec) && isfield(dec, 'flag_ok') && dec.flag_ok
             if dec.frameType == 1
                 if isfield(dec, 'samplingRateHz')
                     fs = double(dec.samplingRateHz);
                     if verbose
-                        fprintf('MeasurementStart: samplingRateHz=%g\n', fs);
+                        if isnan(srcPort)
+                            fprintf('MeasurementStart from %s: samplingRateHz=%g\n', srcIP, fs);
+                        else
+                            fprintf('MeasurementStart from %s:%d samplingRateHz=%g\n', srcIP, srcPort, fs);
+                        end
                     end
                 end
             elseif dec.frameType == 2
-                trace_obj = rteeg_draw_trace(double(dec.sample), fs, 'trace_obj', trace_obj);
+                sampleBlock = double(dec.sample);
+                if isempty(tracePendingChunks)
+                    tracePendingChunks = {sampleBlock};
+                    tracePendingCols = size(sampleBlock, 2);
+                else
+                    firstRows = size(tracePendingChunks{1}, 1);
+                    if firstRows == size(sampleBlock,1)
+                        tracePendingChunks{end+1} = sampleBlock; %#ok<AGROW>
+                        tracePendingCols = tracePendingCols + size(sampleBlock, 2);
+                    else
+                        tracePendingChunks = {sampleBlock};
+                        tracePendingCols = size(sampleBlock, 2);
+                    end
+                end
+
                 packetCount = packetCount + 1;
+
+                if toc(traceLastDrawTic) >= traceUpdateSec && ~isempty(tracePendingChunks)
+                    if numel(tracePendingChunks) == 1
+                        traceDraw = tracePendingChunks{1};
+                    else
+                        nRows = size(tracePendingChunks{1},1);
+                        traceDraw = zeros(nRows, tracePendingCols);
+                        c0 = 1;
+                        for ci = 1:numel(tracePendingChunks)
+                            cc = size(tracePendingChunks{ci},2);
+                            traceDraw(:, c0:c0+cc-1) = tracePendingChunks{ci};
+                            c0 = c0 + cc;
+                        end
+                    end
+                    trace_obj = rteeg_draw_trace(traceDraw, fs, 'trace_obj', trace_obj, 'fig', traceFig);
+                    tracePendingChunks = {};
+                    tracePendingCols = 0;
+                    traceLastDrawTic = tic;
+                    drawnow limitrate;
+                end
+
                 if logEnabled
                     log_packet(dec.sample, toc(tStart), startDatenum);
                 end
@@ -115,6 +274,10 @@ while true
                         x = buffer(specChannel, :);
                         x = x - mean(x);
                         [amp, phase] = morlet_features(x, wavelets);
+                        if isempty(ampLine) || isempty(phaseLine) || ...
+                                ~isgraphics(ampLine) || ~isgraphics(phaseLine)
+                            [specFig, ampLine, phaseLine] = init_spectrum_plot(freqVec); %#ok<NASGU>
+                        end
                         set(ampLine, 'YData', amp);
                         set(phaseLine, 'YData', phase);
                         drawnow limitrate;
@@ -144,6 +307,7 @@ for fi = 1:numel(freqVec)
     bank(fi, :) = w;
 end
 return;
+end
 
 function [amp, phase] = morlet_features(x, bank)
 % Compute wavelet coefficient at last sample (dot product)
@@ -151,6 +315,7 @@ c = bank * x.';
 amp = abs(c).';
 phase = angle(c).';
 return;
+end
 
 function [fig, ampLine, phaseLine] = init_spectrum_plot(freqVec)
 fig = figure('Name', 'Morlet Spectral Amplitude/Phase', 'Color', 'w');
@@ -167,6 +332,7 @@ xlabel('Frequency (Hz)');
 ylabel('Phase (rad)');
 title('Morlet Phase');
 return;
+end
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -261,7 +427,21 @@ function cleanup_all()
     catch
     end
     try
-        clear u;
+        if useJavaUdp
+            if ~isempty(jSock)
+                jSock.close();
+            end
+            if isappdata(0, SOCK_APPDATA_KEY)
+                rmappdata(0, SOCK_APPDATA_KEY);
+            end
+        elseif useUdpPort
+            clear u;
+        else
+            if strcmpi(get(u, 'Status'), 'open')
+                fclose(u);
+            end
+            delete(u);
+        end
     catch
     end
 end

@@ -35,16 +35,25 @@ for k = 1:2:numel(varargin)
     end
 end
 
-if exist('udpport', 'file') ~= 2
-    error('udpport not available in this MATLAB version.');
-end
-
 ok = false;
 info = struct();
 firstPacket = uint8([]);
-
-u = udpport("datagram", "IPV4", "LocalPort", params.localPort);
-cleanupObj = onCleanup(@() clear u);
+u = [];
+useUdpPort = (exist('udpport', 'file') == 2);
+useLegacyUdp = (exist('udp', 'file') == 2);
+jSock = [];
+useJavaUdp = false;
+if useUdpPort
+    u = udpport("datagram", "IPV4", "LocalPort", params.localPort);
+elseif useLegacyUdp
+    u = udp('0.0.0.0', 'LocalPort', params.localPort);
+    fopen(u);
+else
+    useJavaUdp = true;
+    jSock = java.net.DatagramSocket(params.localPort);
+    jSock.setSoTimeout(10);
+end
+cleanupObj = onCleanup(@() local_cleanup_udp(u, jSock, useUdpPort, useLegacyUdp, useJavaUdp)); %#ok<NASGU>
 
 if params.verbose
     fprintf('Checking UDP on port %d (timeout %.1f s)...\n', params.localPort, params.timeoutSec);
@@ -52,18 +61,60 @@ end
 
 tStart = tic;
 while toc(tStart) < params.timeoutSec
-    if u.NumDatagramsAvailable > 0
-        [data, src] = read(u, 1, "uint8");
-        ok = true;
-        firstPacket = uint8(data(:).');
-        info.srcIP = src.Address;
-        info.srcPort = src.Port;
-        info.len = numel(data);
-        info.tsec = toc(tStart);
-        break;
+    if useUdpPort
+        if u.NumDatagramsAvailable > 0
+            [data, src] = read(u, 1, "uint8");
+            ok = true;
+            firstPacket = uint8(data(:).');
+            info.srcIP = src.Address;
+            info.srcPort = src.Port;
+            info.len = numel(data);
+            info.tsec = toc(tStart);
+            break;
+        end
+    elseif useLegacyUdp
+        nAvail = get(u, 'BytesAvailable');
+        if nAvail > 0
+            data = fread(u, nAvail, 'uint8');
+            ok = true;
+            firstPacket = uint8(data(:).');
+            info.srcIP = '';
+            info.srcPort = NaN;
+            info.len = numel(data);
+            info.tsec = toc(tStart);
+            break;
+        end
     else
-        pause(0.01);
+        try
+            rxBuf = int8(zeros(65535, 1));
+            pkt = java.net.DatagramPacket(rxBuf, numel(rxBuf));
+            jSock.receive(pkt);
+            n = pkt.getLength();
+            raw = pkt.getData();
+            % Preserve raw byte values when converting Java byte[] -> MATLAB uint8.
+            data = typecast(raw(1:n), 'uint8').';
+            ok = true;
+            firstPacket = data;
+            info.srcIP = char(pkt.getAddress().getHostAddress());
+            info.srcPort = double(pkt.getPort());
+            info.len = n;
+            info.tsec = toc(tStart);
+            break;
+        catch ME
+            msg = '';
+            try
+                msg = char(ME.message);
+            catch
+            end
+            isTimeout = contains(char(ME.identifier), 'SocketTimeoutException') || ...
+                        contains(msg, 'SocketTimeoutException') || ...
+                        contains(msg, 'Receive timed out');
+            if ~isTimeout
+                rethrow(ME);
+            end
+        end
     end
+    pause(0.01);
 end
 
 if params.verbose
@@ -75,4 +126,30 @@ if params.verbose
     end
 end
 
+return;
+
+function local_cleanup_udp(u, jSock, useUdpPort, useLegacyUdp, useJavaUdp)
+if useJavaUdp
+    try
+        if ~isempty(jSock)
+            jSock.close();
+        end
+    catch
+    end
+    return;
+end
+if isempty(u)
+    return;
+end
+try
+    if useUdpPort
+        clear u;
+    elseif useLegacyUdp
+        if strcmpi(get(u, 'Status'), 'open')
+            fclose(u);
+        end
+        delete(u);
+    end
+catch
+end
 return;
